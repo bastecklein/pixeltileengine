@@ -1,0 +1,40 @@
+{
+    "name": "pixeltileengine",
+    "version": "1.0.0",
+    "description": "A javascript software game rendering engine for creating tile map based games using Pixel Paint .ppp graphics.",
+    "scripts": {
+        "build": "webpack --config webpack.common.cjs"
+    },
+    "keywords": ["engine", "library", "ape apps", "module", "game", "pixel", "tile", "rendering", "ppp"],
+    "homepage": "https://www.ape-apps.com",
+    "bugs": {
+        "email": "support@ape-apps.com"
+    },
+    "author": {
+        "name": "Ape Apps",
+        "email": "support@ape-apps.com",
+        "url": "https://www.ape-apps.com"
+    },
+    "funding": {
+        "type": "patreon",
+        "url": "https://www.patreon.com/apeapps"
+    },
+    "license": "Apache-2.0",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/bastecklein/pixeltileengine"
+    },
+    "main": "src/index.js",
+    "config": {},
+    "dependencies": {
+        "common-helpers": "git+ssh://git@github.com:bastecklein/common-helpers.git#main",
+        "ppp-tools": "git+ssh://git@github.com:bastecklein/ppp-tools.git#main",
+        "input-helper": "git+ssh://git@github.com:bastecklein/input-helper.git#main"
+    },
+    "devDependencies": {
+        "webpack": "*",
+        "webpack-cli": "*"
+    },
+    "private": false,
+    "type": "module"
+}
