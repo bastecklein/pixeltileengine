@@ -1279,7 +1279,7 @@ function setColorAtPoint(instance, outputData, x, y, r, g, b, a, composit, ignor
 
     if(!ignoreLighting) {
 
-        const lighting = instance.getLightingAsPosition(x, y);
+        const lighting = instance.getLightingAtPosition(x, y);
 
         r = multiplyColors(r, lighting.r, false);
         g = multiplyColors(g, lighting.g, false);
