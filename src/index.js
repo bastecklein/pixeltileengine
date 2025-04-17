@@ -57,7 +57,7 @@ export function onResize() {
     }
 }
 
-class PixelEngineInstance {
+export class PixelEngineInstance {
     constructor(holder, options) {
         const instanceRef = this;
 
@@ -434,7 +434,7 @@ class PixelEngineInstance {
     }
 }
 
-class Texture {
+export class Texture {
     constructor(options) {
         this.id = guid();
 
@@ -1672,7 +1672,9 @@ export default {
     loadTexture,
     getTargetFramerate,
     isOdd,
-    onResize
+    onResize,
+    PixelEngineInstance,
+    Texture
 };
 
 globalRender();

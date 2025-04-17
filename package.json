@@ -33,7 +33,11 @@
     },
     "devDependencies": {
         "webpack": "*",
-        "webpack-cli": "*"
+        "webpack-cli": "*",
+        "@eslint/js": "*",
+        "@eslint/json": "*",
+        "eslint": "*",
+        "globals": "*"
     },
     "private": false,
     "type": "module"
