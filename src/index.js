@@ -1,6 +1,6 @@
 import { renderPPP } from "ppp-tools";
 import { handleInput } from "input-helper";
-import { guid, removeFromArray, distBetweenPoints, hexToRGB, randomIntFromInterval } from "common-helpers";
+import { guid, removeFromArray, distBetweenPoints, hexToRGB, randomIntFromInterval, rgbToHex } from "common-helpers";
 
 window.addEventListener("resize", onResize);
 
@@ -10,30 +10,81 @@ const DEF_TILE_SIZE = 16;
 const TEXTURE_CYCLE_MAX = 8;
 const PI_ONE_EIGHTY = Math.PI / 180;
 
+export const EFFECT_PROGRAMS = {
+    "splat": partProgSplat,
+    "smoke": partProgSmoke,
+    "ember": partProgEmber
+};
+
+export const ENVIRONMENTAL_EFFECTS = {
+    "none": 0,
+    "rain": 1,
+    "snow": 2,
+    "embers": 3
+};
+
 let textureCycleCounter = 0;
 
-let allTextures = [];
+/**
+ * @type {Texture[]}
+ * @description An array to hold all loaded textures.
+ */
+const allTextures = [];
 
-let engineInstances = {};
+/**
+ * @type {Object<string, PixelEngineInstance>}
+ * @description A dictionary to hold all instances of PixelEngine.
+ * The keys are instance IDs, and the values are the corresponding PixelEngineInstance objects.
+ *  */
+const engineInstances = {};
 
-let instructionRecycling = [];
+/**
+ * @type {DrawInstruction[]}
+ * @description A pool of draw instructions that can be recycled for efficiency.
+ */
+const instructionRecycling = [];
+
+/**
+ * @type {ParticleInstruction[]}
+ * @description A pool of particle instructions that can be recycled for efficiency.
+ */
+const particleInstructionRecycling = [];
 
 let overrideOffTurn = false;
 
 let lastRAF = null;
 
+/**
+ * Initializes a new PixelEngine instance.
+ * @param {HTMLElement} holder - The HTML element that will hold the canvas.
+ * @param {Object} [options] - Optional configuration options for the instance.
+ * @param {number} [options.width=256] - The width of the canvas.
+ * @param {HTMLCanvasElement} [options.fixedCanvas] - The fixed canvas element to use.  The canvas will not be created or resized by the engine.
+ * @returns {PixelEngineInstance} The newly created PixelEngine instance.
+ */
 export function getPixelEngineInstance(holder, options) {
     if(!options) {
         options = {};
     }
 
     const engine = new PixelEngineInstance(holder, options);
-
     engineInstances[engine.id] = engine;
 
     return engine;
 }
 
+/**
+ * Loads a texture into the engine.
+ * @param {Object} options - The options for the texture.
+ * @param {string} options.type - The type of the texture (e.g., "ppp", "image").
+ * @param {string} options.data - The data for the texture (e.g., image URL, PPP object).
+ * @param {Array} [options.colors] - An array of color replacements for the texture.
+ * @param {Array} [options.accessories] - An array of accessory objects for the texture.
+ * @param {string} [options.state] - The state of the texture (e.g., "standing", "walking").
+ * @param {string} [options.facing] - The facing direction of the texture (e.g., "e", "w").
+ * @param {string} [options.outlineColor] - The outline color for the texture.
+ * @returns {Texture} The loaded texture.
+ */
 export function loadTexture(options) {
     const texture = new Texture(options);
 
@@ -42,14 +93,27 @@ export function loadTexture(options) {
     return texture;
 }
 
+/**
+ * Returns the engine target framerate.
+ * @returns {number} The target framerate.
+ * */
 export function getTargetFramerate() {
     return TARGET_FRAMERATE;
 }
 
+/**
+ * Checks if a number is odd.
+ * @param {number} num - The number to check.
+ * @returns {boolean} True if the number is odd, false otherwise.
+ */
 export function isOdd(num) {
     return num % 2;
 }
 
+/**
+ * Force a resize of all engine instances.
+ * @returns {void}
+ */
 export function onResize() {
     for(let instanceId in engineInstances) {
         const instance = engineInstances[instanceId];
@@ -70,7 +134,6 @@ export class PixelEngineInstance {
 
         if(options.fixedCanvas) {
             this.fixedCanvas = true;
-
             this.canvas = options.fixedCanvas;
         } else {
             
@@ -94,9 +157,11 @@ export class PixelEngineInstance {
         this.canvas.style.imageRendering = "pixelated";
         this.context.imageSmoothingEnabled = false;
 
-        this.width = 256;
+        this.width = options.width || 256;
         this.height = 224;
         this.tileSize = DEF_TILE_SIZE;
+
+        this.rndAngle = 0;
 
         this.viewX = 0;
         this.viewY = 0;
@@ -125,10 +190,11 @@ export class PixelEngineInstance {
 
         this.renderInstructions = [];
         this.activeLights = [];
+        this.programParticles = [];
 
-        if(options.width) {
-            this.width = options.width;
-        }
+        this.environmentalEffect = ENVIRONMENTAL_EFFECTS.none;
+
+        this.roundingOp = Math.round;
 
         this.lighting = {
             r: 255,
@@ -223,6 +289,18 @@ export class PixelEngineInstance {
             g: g,
             b: b
         };
+    }
+
+    /**
+     * Sets the environmental effect for the instance.
+     * @param {number} effect - The environmental effect to set (e.g., ENVIRONMENTAL_EFFECTS.rain).
+     */
+    setEnvironmentalEffect(effect) {
+        if(effect) {
+            this.environmentalEffect = effect;
+        } else {
+            this.environmentalEffect = ENVIRONMENTAL_EFFECTS.none;
+        }
     }
 
     setLighting(hex, intensity) {
@@ -411,6 +489,91 @@ export class PixelEngineInstance {
         instance.renderInstructions.push(drawOp);
     }
 
+    drawParticle(options) {
+        if(!options.color) {
+            return;
+        }
+
+        const drawOp = getFreshDrawOperation();
+
+        drawOp.type = "particle";
+
+        drawOp.useState = options.color;
+
+        drawOp.x = options.x || 0;
+        drawOp.y = options.y || 0;
+        drawOp.z = options.z || 0;
+
+        drawOp.scale = options.scale || 1;
+        drawOp.opacity = options.opacity || 1;
+        drawOp.composit = options.composit || null;
+        drawOp.ignoreLighting = options.ignoreLighting || false;
+        drawOp.colorFilter = options.colorFilter || null;
+
+        drawOp.useRaw = options.useRaw || false;
+
+        this.renderInstructions.push(drawOp);
+    }
+
+    playParticleEffect(options) {
+        if(!options.effect) {
+            return;
+        }
+
+        const program = EFFECT_PROGRAMS[options.effect];
+
+        if(program) {
+            program(this, options);
+        }
+    }
+
+    insertParticleInstruction(options) {
+        const instruction = getFreshParticleOperation();
+
+        instruction.x = options.x || 0;
+        instruction.y = options.y || 0;
+        instruction.z = options.z || 0;
+
+        instruction.zI = options.zI || 0;
+
+        instruction.color = options.color || "#ff0000";
+        instruction.size = options.size || 1;
+        instruction.colorVariance = options.colorVariance || 0;
+
+        instruction.vx = options.vx || 0;
+        instruction.vy = options.vy || 0;
+        instruction.vz = options.vz || 0;
+
+        instruction.gz = options.gz || 0.01;
+        instruction.tv = options.tv || 0.04;
+
+        instruction.composit = options.composit || null;
+        instruction.life = options.life || -1;
+
+        instruction.opacity = options.opacity || 1;
+
+        instruction.stayOnGround = options.stayOnGround || false;
+        instruction.lifeOnGround = options.lifeOnGround || -1;
+
+        instruction.glowRadius = options.glowRadius || 0;
+        instruction.glowBrightness = options.glowBrightness || 0;
+
+        instruction.fadeSpeed = options.fadeSpeed || 0;
+
+        instruction.trails = options.trails || false;
+        instruction.ignoreLighting = options.ignoreLighting || false;
+        instruction.useRaw = options.useRaw || false;
+        instruction.useGlobalAngle = options.useGlobalAngle || false;
+        instruction.loopsBack = options.loopsBack || false;
+        instruction.splatOnImpact = options.splatOnImpact || false;
+
+        if(instruction.colorVariance != 0) {
+            instruction.color = variateHexColor(instruction.color, instruction.colorVariance);
+        }
+
+        this.programParticles.push(instruction);
+    }
+
     kill() {
         const instance = this;
 
@@ -478,6 +641,25 @@ export class Texture {
     }
 }
 
+/**
+ * Class representing a draw instruction.
+ * @property {string} type - The type of the draw instruction (e.g., "tile", "sprite", "light", "particle").
+ * @property {number} x - The x-coordinate of the draw instruction.
+ * @property {number} y - The y-coordinate of the draw instruction.
+ * @property {number} z - The zIndex of the draw instruction.
+ * @property {Texture} texture - The texture associated with the draw instruction.
+ * @property {number} frame - The frame index of the texture to use.
+ * @property {number} scale - The scale factor for the draw instruction.
+ * @property {number} opacity - The opacity of the draw instruction.
+ * @property {string} useState - The state of the sprite (e.g., "standing", "walking", "dead", "using", "attacking").  For particles, this is the color.
+ * @property {string} useFacing - The facing direction of the sprite (e.g., "e", "w").
+ * @property {boolean} useRaw - Whether to use raw coordinates for the draw instruction.
+ * @property {boolean} mirror - Whether to mirror the sprite.
+ * @property {number} rotation - The rotation angle of the sprite in radians.
+ * @property {string} composit - The operation to use for compositing.
+ * @property {boolean} ignoreLighting - Whether to ignore lighting effects.
+ * @property {object} colorFilter - The color filter to apply to the sprite.
+ */
 class DrawInstruction {
     constructor() {
         this.type = null;
@@ -496,6 +678,80 @@ class DrawInstruction {
         this.composit = null;
         this.ignoreLighting = false;
         this.colorFilter = null;
+    }
+}
+
+/**
+ * Class representing a particle instruction, a retained instruction between rendering frames
+ * that tracks the life of a particle.
+ * @property {number} x - The x-coordinate of the particle.
+ * @property {number} y - The y-coordinate of the particle.
+ * @property {number} z - The z-coordinate of the particle.
+ * @property {number} zI - The z-index of the particle.
+ * @property {string} color - The color of the particle.
+ * @property {number} colorVariance - The variance in color for the particle.
+ * @property {number} size - The size of the particle (in pixels)
+ * @property {number} vx - The x velocity of the particle.
+ * @property {number} vy - The y velocity of the particle.
+ * @property {number} vz - The z velocity of the particle.
+ * @property {number} gz - The gravity effect on the particle.
+ * @property {number} tv - The terminal velocity of the particle.
+ * @property {string} composit - The compositing operation for the particle.
+ * @property {number} life - The remaining life of the particle.
+ * @property {boolean} cashed - Whether the particle has completed its life and can be recycled.
+ * @property {number} opacity - The opacity of the particle.
+ * @property {boolean} stayOnGround - If the particle should stop moving when it hits the simulated ground.
+ * @property {number} lifeOnGround - The remaining life of the particle when it is on the ground.
+ * @property {number} glowRadius - The radius of the glow effect for the particle.  Will draw a light effect.
+ * @property {number} glowBrightness - The brightness of the glow effect for the particle.
+ * @property {number} fadeSpeed - The speed at which the particle fades out.
+ * @property {boolean} trails - Whether the particle should leave a trail.
+ * @property {boolean} ignoreLighting - Whether the particle should ignore lighting effects.
+ * @property {boolean} useRaw - Whether to use raw coordinates for the particle.
+ * @property {boolean} useGlobalAngle - Whether to use a global angle for the particle.
+ * @property {boolean} loopsBack - Whether the particle should loop back to the other side of the screen if it leaves the view bounds
+ * @property {boolean} splatOnImpact - Whether the particle should splat on impact with the ground.
+ */
+class ParticleInstruction {
+    constructor() {
+        this.x = 0;
+        this.y = 0;
+        this.z = 0;
+
+        this.zI = 0;
+
+        this.color = "#ff0000";
+        this.colorVariance = 0;
+        this.size = 1;
+
+        this.vx = 0;
+        this.vy = 0;
+        this.vz = 0;
+        
+        this.gz = 0.01;
+        this.tv = 0.04;
+
+        this.composit = null;
+
+        this.life = -1;
+        this.cashed = false;
+
+        this.opacity = 1;
+
+        this.stayOnGround = false;
+        this.lifeOnGround = -1;
+
+        this.glowRadius = 0;
+        this.glowBrightness = 0;
+
+        this.fadeSpeed = 0;
+
+        this.trails = false;
+        this.ignoreLighting = false;
+        this.useRaw = false;
+        this.useGlobalAngle = false;
+        this.loopsBack = false;
+        this.splatOnImpact = false;
     }
 }
 
@@ -521,6 +777,12 @@ function resizeInstance(instance) {
 
         instance.canvas.width = instance.width;
         instance.canvas.height = instance.height;
+    }
+
+    if(isOdd(instance.height)) {
+        instance.roundingOp = Math.floor;
+    } else {
+        instance.roundingOp = Math.round;
     }
 
     instance.canvas.style.imageRendering = "pixelated";
@@ -677,9 +939,13 @@ function initTexture(texture) {
     }
 }
 
+/**
+ * Get a new draw operation from the recycling pool or create a new one if none are available.
+ * @returns {DrawInstruction} A new or recycled DrawInstruction object.
+ */
 function getFreshDrawOperation() {
 
-    let op = instructionRecycling.pop();
+    const op = instructionRecycling.pop();
 
     if(op) {
         op.type = null;
@@ -699,7 +965,7 @@ function getFreshDrawOperation() {
         op.ignoreLighting = false;
         op.colorFilter = null;
     } else {
-        op = new DrawInstruction();
+        return new DrawInstruction();
     }
 
     return op;
@@ -709,6 +975,34 @@ function renderInstance(instance, elapsed, delta, fps) {
 
     if(instance.renderFunction) {
         instance.renderFunction(fps, delta, elapsed);
+    }
+
+    instance.rndAngle += delta * 0.002;
+
+    if(instance.rndAngle > 360) {
+        instance.rndAngle -= 360;
+    }
+
+    const currentBounds = instance.getViewBounds();
+
+    runEnvironmentalConditions(instance, currentBounds);
+   
+    const completePrograms = [];
+
+    for(let i = 0; i < instance.programParticles.length; i++) {
+        const inst = instance.programParticles[i];
+
+        if(inst.cashed) {
+            completePrograms.push(inst);
+            continue;
+        }
+
+        updateParticle(instance, inst, delta, currentBounds);
+    }
+
+    while(completePrograms.length > 0) {
+        const inst = completePrograms.pop();
+        particleInstructionRecycling.push(inst);
     }
 
     instance.canvas.width = instance.width;
@@ -771,6 +1065,10 @@ function renderInstance(instance, elapsed, delta, fps) {
 
         if(inst.type == "sprite") {
             renderSprite(instance, inst, outputData);
+        }
+
+        if(inst.type == "particle") {
+            renderParticle(instance, inst, outputData);
         }
     }
 
@@ -842,14 +1140,13 @@ function cycleTexture(texture) {
     }
 }
 
-function getCanvasCoordinate(instance, x, y) {
-
+function getCanvasCoordinatePrecise(instance, x, y) {
     let hw = 0;
     let hh = 0;
 
     if(instance.fixedCanvas) {
-        hw = instance.canvas.offsetWidth;
-        hh = instance.canvas.offsetHeight;
+        hw = instance.canvas.width;
+        hh = instance.canvas.height;
     } else {
         const holder = instance.holder;
         hw = holder.offsetWidth;
@@ -860,8 +1157,18 @@ function getCanvasCoordinate(instance, x, y) {
     const yPer = y / hh;
 
     return {
-        x: Math.floor(instance.width * xPer),
-        y: Math.floor(instance.height * yPer)
+        x: instance.width * xPer,
+        y: instance.height * yPer
+    };
+}
+
+function getCanvasCoordinate(instance, x, y) {
+
+    const precice = getCanvasCoordinatePrecise(instance, x, y);
+
+    return {
+        x: Math.floor(precice.x),
+        y: Math.floor(precice.y)
     };
 }
 
@@ -1088,12 +1395,7 @@ function renderSprite(instance, inst, outputData) {
 
     const data = frames[useFrame];
 
-    let op = Math.round;
 
-    if(isOdd(instance.height)) {
-        op = Math.floor;
-    }
-    
     let uvx = instance.viewX;
 
     if(inst.useRaw) {
@@ -1101,7 +1403,7 @@ function renderSprite(instance, inst, outputData) {
     }
 
     const dx = Math.round((inst.x * instance.tileSize) - uvx);
-    const dy = op((inst.y * instance.tileSize) - instance.viewY) - (texture.height - instance.tileSize);
+    const dy = instance.roundingOp((inst.y * instance.tileSize) - instance.viewY) - (texture.height - instance.tileSize);
 
     const inD = data.data;
 
@@ -1227,25 +1529,6 @@ function drawImageData(instance, texture, inputData, dx, dy, scale, composit, ro
                     incomingB = 255;
                 }
             }
-
-            /*
-            if(lightData) {
-                const ldAl = lightData[inputIndex + 3];
-
-                if(ldAl > 0) {
-                    const ndr = lightData[inputIndex];
-                    const ndg = lightData[inputIndex + 1];
-                    const ndb = lightData[inputIndex + 2];
-
-                    const lightLevel = (((ndr + ndg + ndb) / 3) / 255) * (ldAl / 255);
-
-                    if(lightLevel > 0) {
-                        lineIgnoreLighting = true;
-                    }
-
-                }
-            }
-                */
 
             setColorAtPoint(instance, outputData, x, y, incomingR, incomingG, incomingB, incomingA, composit, ignoreLighting);
             
@@ -1634,6 +1917,15 @@ function lighterColors(c1, c2) {
     return col;
 }
 
+/**
+ * Calculate the screen effect of two color values.
+ * @param {number} c1 - The first color value.
+ * @param {number} c2 - The second color value.
+ * @param {boolean} alreadySingled - Whether the color values are already in the 0-1 range.
+ * @returns {number} The resulting color value after applying the screen effect.
+ * If the result exceeds 255, it returns 255.
+ * If the result is negative, it returns 0.
+ */
 function screenColors(c1, c2, alreadySingled) {
     if(alreadySingled) {
         return colorSingle(1 - ((1 - c1) * (1 - c2)));
@@ -1645,10 +1937,24 @@ function screenColors(c1, c2, alreadySingled) {
     }
 }
 
+/**
+ * Get the darker of two color values.
+ * @param {number} c1 - The first color value.
+ * @param {number} c2 - The second color value.
+ * @returns {number} The darker color value.
+ * If both colors are equal, it returns the color value.
+ */
 function darkenColors(c1, c2) {
     return Math.min(c1,c2);
 }
 
+/**
+ * Calculate the difference between two color values.
+ * @param {number} c1 - The first color value.
+ * @param {number} c2 - The second color value.
+ * @returns {number} The difference between the two color values.
+ * If the difference is negative, it returns 0.
+ */
 function darkerColors(c1, c2) {
     let col = c1 - c2;
 
@@ -1659,12 +1965,582 @@ function darkerColors(c1, c2) {
     return col;
 }
 
+/**
+ * Convert a color value from 0-1 range to a 0-255 range.
+ * @param {number} s - The color value (0-1).
+ * @returns {number} The color value in the range of 0-255.
+ */
 function colorSingle(s) {
     return Math.round(s * 255);
 }
 
+/**
+ * Convert a color value from 0-255 range to a 0-1 range.
+ * @param {number} c - The color value (0-255).
+ * @returns {number} The color value in the range of 0-1.
+ */
 function singleColor(c) {
     return c / 255;
+}
+
+/**
+ * Get a new particle operation from the recycling pool or create a new one if none are available.
+ * @returns {ParticleInstruction} A new or recycled ParticleInstruction object.
+ */
+function getFreshParticleOperation() {
+    const op = particleInstructionRecycling.pop();
+
+    if(op) {
+        op.x = 0;
+        op.y = 0;
+        op.z = 0;
+
+        op.zI = 0;
+
+        op.color = "#ff0000";
+        op.colorVariance = 0;
+        op.size = 1;
+
+        op.vx = 0;
+        op.vy = 0;
+        op.vz = 0;
+        
+        op.gz = 0.01;
+        op.tv = 0.04;
+
+        op.composit = null;
+
+        op.life = -1;
+        op.cashed = false;
+
+        op.opacity = 1;
+
+        op.stayOnGround = false;
+        op.lifeOnGround = -1;
+
+        op.glowRadius = 0;
+        op.glowBrightness = 0;
+
+        op.fadeSpeed = 0;
+
+        op.trails = false;
+        op.ignoreLighting = false;
+        op.useRaw = false;
+        op.useGlobalAngle = false;
+        op.loopsBack = false;
+        op.splatOnImpact = false;
+    } else {
+        return new ParticleInstruction();
+    }
+
+    return op;
+}
+
+/**
+ * Program for the "Splat" effect.
+ * @param {PixelEngineInstance} instance - The pixel engine instance.
+ * @param {Object} options - Options for the splat effect.
+ * @param {string} options.color - Color of the splat.
+ * @param {number} options.size - Size of each splat particle.
+ * @param {number} options.amount - Number of splat particles to create.
+ * @param {number} options.x - X coordinate of the splat center.
+ * @param {number} options.y - Y coordinate of the splat center.
+ * @param {number} options.z - Simulated elevation of the splat.
+ * @param {number} options.zI - zIndex of the effect.
+ * @param {boolean} options.useRaw - Whether to use raw coordinates.
+ * @param {boolean} options.stayOnGround - Whether the splat should stay on the ground.
+ */
+function partProgSplat(instance, options) {
+    const color = options.color || "#ff0000";
+    const size = options.size || 1;
+    const zIndex = options.zI || 0;
+    const z = options.z || 0.5;
+    const useRaw = options.useRaw || false;
+
+    let amount = options.amount || randomIntFromInterval(15, 60);
+
+    while(amount > 0) {
+        amount--;
+
+        const vx = (randomIntFromInterval(0, 100) - 50) / 1000;
+        const vy = (randomIntFromInterval(0, 100) - 50) / 1000;
+        const vz = (randomIntFromInterval(0, 100) - 50) / 1000;
+
+        instance.insertParticleInstruction({
+            color: color,
+            x: options.x,
+            y: options.y,
+            z: z,
+            zI: zIndex,
+            vx: vx,
+            vy: vy,
+            vz: vz,
+            size: size,
+            stayOnGround: options.stayOnGround || true,
+            lifeOnGround: 800,
+            useRaw: useRaw,
+        });
+    }
+}
+
+/**
+ * Update the particle instance.
+ * @param {PixelEngineInstance} instance - The pixel engine instance.
+ * @param {ParticleInstruction} inst - The particle instruction to update.
+ * @param {number} delta - The time delta since the last update.
+ * @param {Object} bounds - The current view bounds.
+ */
+function updateParticle(instance, inst, delta, bounds) {
+    if(delta > 20) {
+        delta = 1;
+    }
+
+    inst.opacity -= inst.fadeSpeed * delta;
+
+    if(inst.opacity <= 0) {
+        inst.cashed = true;
+        return;
+    }
+
+    if(inst.life > -1) {
+        inst.life -= delta;
+
+        if(inst.life <= 0) {
+            inst.cashed = true;
+            return;
+        }
+    }
+
+    const ox = inst.x;
+    const oy = inst.y;
+    const oz = inst.z;
+
+    if(inst.useGlobalAngle) {
+        inst.x += (Math.sin(instance.rndAngle) * 2) * delta;
+    } else {
+        inst.x += inst.vx * delta;
+    }
+    
+    inst.y += inst.vy * delta;
+
+    if(inst.life == -1) {
+        if(inst.x < bounds.xMin && inst.vx < 0) {
+            if(inst.loopsBack) {
+                inst.x = bounds.xMax;
+            } else {
+                inst.cashed = true;
+            }
+            return;
+        }
+    
+        if(inst.x > bounds.xMax && inst.vx > 0) {
+            if(inst.loopsBack) {
+                inst.x = bounds.xMin;
+            } else {
+                inst.cashed = true;
+            }
+            return;
+        }
+    
+        if(inst.y < bounds.yMin && inst.vy < 0) {
+            inst.cashed = true;
+            return;
+        }
+    
+        if(inst.y > bounds.yMax && inst.vy > 0) {
+            inst.cashed = true;
+            return;
+        }
+    }
+    
+    let velZ = inst.vz;
+
+    if(velZ > inst.tv) {
+        velZ = inst.tv;
+    }
+
+    inst.vz += inst.gz * delta;
+
+    inst.z -= velZ * delta;
+
+    if(inst.z <= 0) {
+        if(inst.stayOnGround) {
+            inst.z = 0;
+            inst.vx = 0;
+            inst.vy = 0;
+            inst.vz = 0;
+            inst.gz = 0;
+            inst.tv = 0;
+
+            if(inst.life == -1 && inst.lifeOnGround > -1) {
+                inst.life = inst.lifeOnGround;
+            }
+        } else {
+            inst.cashed = true;
+
+            if(inst.splatOnImpact) {
+                partProgSplat(instance, {
+                    color: inst.color,
+                    size: inst.size,
+                    amount: randomIntFromInterval(0, 6),
+                    x: ox,
+                    y: oy,
+                    z: oz,
+                    zI: inst.zI,
+                    useRaw: inst.useRaw,
+                    stayOnGround: false
+                });
+            }
+
+            return;
+        }
+    }
+
+    if(inst.trails) {
+        instance.insertParticleInstruction({
+            x: ox,
+            y: oy,
+            z: oz,
+            vx: 0,
+            vy: 0,
+            vz: 0,
+            gz: 0,
+            tv: 0,
+            color: inst.color,
+            size: inst.size,
+            opacity: inst.opacity,
+            composit: inst.composit,
+            fadeSpeed: inst.fadeSpeed + 0.02,
+            ignoreLighting: inst.ignoreLighting,
+            trails: false,
+            useRaw: inst.useRaw,
+        });
+    }
+
+    if(inst.glowRadius > 0 && inst.glowBrightness > 0) {
+        instance.drawLight({
+            color: inst.color,
+            x: inst.x,
+            y: inst.y,
+            intensity: inst.glowBrightness,
+            radius: inst.glowRadius
+        });
+    }
+
+    const renderZIndex = inst.zI + Math.floor(inst.z);
+
+    instance.drawParticle({
+        x: inst.x,
+        y: inst.y,
+        z: renderZIndex,
+        color: inst.color,
+        scale: inst.size,
+        opacity: inst.opacity,
+        composit: inst.composit,
+        ignoreLighting: inst.ignoreLighting,
+        useRaw: inst.useRaw,
+    });
+}
+
+/**
+ * Render the particle instance.
+ * @param {PixelEngineInstance} instance - The pixel engine instance.
+ * @param {DrawInstruction} inst - The draw instruction to render.
+ * @param {Object} outputData - The output data to render to.
+ */
+function renderParticle(instance, inst, outputData) {
+    const color = inst.useState;
+
+    if(!color || inst.opacity <= 0) {
+        return;
+    }
+
+    let uvx = instance.viewX;
+
+    if(inst.useRaw) {
+        uvx = instance.viewXraw;
+    }
+
+    const elevationOffset = Math.round(inst.z * instance.tileSize);
+
+    const dx = Math.round((inst.x * instance.tileSize) - uvx);
+    const dy = (instance.roundingOp((inst.y * instance.tileSize) - instance.viewY) - (inst.scale - instance.tileSize)) - elevationOffset;
+
+    let minX = dx;
+    let maxX = dx + inst.scale;
+
+    let minY = dy;
+    let maxY = dy + inst.scale;
+
+    const rgb = hexToRGB(color);
+
+    let r = rgb.r;
+    let g = rgb.g;
+    let b = rgb.b;
+
+    const a = Math.round(inst.opacity * 255);
+
+    if(inst.colorFilter) {
+        r += inst.colorFilter.r;
+        g += inst.colorFilter.g;
+        b += inst.colorFilter.b;
+
+        if(r > 255) {
+            r = 255;
+        }
+
+        if(g > 255) {
+            g = 255;
+        }
+
+        if(b > 255) {
+            b = 255;
+        }
+
+        if(r < 0) {
+            r = 0;
+        }
+
+        if(g < 0) {
+            g = 0;
+        }
+
+        if(b < 0) {
+            b = 0;
+        }
+    }
+
+    for(let x = minX; x < maxX; x++) {
+        if(x < 0 || x >= instance.width) {
+            continue;
+        }
+
+        for(let y = minY; y < maxY; y++) {
+            if(y < 0 || y >= instance.height) {
+                continue;
+            }
+
+            setColorAtPoint(instance, outputData, x, y, r, g, b, a, inst.composit, inst.ignoreLighting);
+        }
+    }
+}
+
+/**
+ * Run the environmental conditions for the given instance.
+ * @param {PixelEngineInstance} instance - The pixel engine instance.
+ * @param {Object} bounds - The current view bounds.
+ */
+function runEnvironmentalConditions(instance, bounds) {
+    if(instance.environmentalEffect == ENVIRONMENTAL_EFFECTS.none) {
+        return;
+    }
+
+    if(instance.environmentalEffect == ENVIRONMENTAL_EFFECTS.rain) {
+        handleInstanceRain(instance, bounds);
+    }
+
+    if(instance.environmentalEffect == ENVIRONMENTAL_EFFECTS.snow) {
+        handleInstanceSnow(instance, bounds);
+    }
+
+    if(instance.environmentalEffect == ENVIRONMENTAL_EFFECTS.embers) {
+        handleInstanceEmbers(instance, bounds);
+    }
+}
+
+/** 
+ * Handle the rain effect for the given instance.
+ * @param {PixelEngineInstance} instance - The pixel engine instance.
+ * @param {Object} bounds - The current view bounds.
+ */
+function handleInstanceRain(instance, bounds) {
+    let dropCount = randomIntFromInterval(0, 3);
+
+    while(dropCount > 0) {
+        dropCount--;
+
+        const rx = randomIntFromInterval((bounds.xMin - 1) * 100, (bounds.xMax + 1) * 100);
+        const ry = randomIntFromInterval((bounds.yMin - 1) * 100, (bounds.yMax + 1) * 100);
+
+        const rv = randomIntFromInterval(6, 14) / 100;
+
+        instance.insertParticleInstruction({
+            x: rx / 100,
+            y: ry / 100,
+            z: instance.height / instance.tileSize,
+            vx: 0,
+            vy: rv,
+            vz: 0,
+            gz: 0,
+            tv: 0,
+            color: "#42A5F5",
+            size: 1,
+            opacity: 0.3,
+            composit: null,
+            ignoreLighting: false,
+            trails: true,
+            useRaw: false
+        });
+    }
+}
+
+/**
+ * Handle the snow effect for the given instance.
+ * @param {PixelEngineInstance} instance - The pixel engine instance.
+ * @param {Object} bounds - The current view bounds.
+ */
+function handleInstanceSnow(instance, bounds) {
+    const snowChance = randomIntFromInterval(0, 5);
+
+    if(snowChance == 2) {
+        const rx = randomIntFromInterval((bounds.xMin - 1) * 100, (bounds.xMax + 1) * 100);
+        const ry = randomIntFromInterval((bounds.yMin - 1) * 100, (bounds.yMax + 1) * 100);
+
+        const rv = randomIntFromInterval(1, 6) / 100;
+
+        instance.insertParticleInstruction({
+            x: rx / 100,
+            y: ry / 100,
+            z: instance.height / instance.tileSize,
+            vx: Math.sin(instance.rndAngle) * 2,
+            vy: rv,
+            vz: 0,
+            gz: 0,
+            tv: 0,
+            color: "#ffffff",
+            size: 1,
+            opacity: 0.8,
+            composit: null,
+            ignoreLighting: false,
+            trails: false,
+            useRaw: false,
+            useGlobalAngle: true,
+            loopsBack: true,
+            stayOnGround: true,
+            lifeOnGround: 300
+        });
+    }
+}
+
+/**
+ * Handle the embers effect for the given instance.
+ * @param {PixelEngineInstance} instance - The pixel engine instance.
+ * @param {Object} bounds - The current view bounds.
+ */
+function handleInstanceEmbers(instance, bounds) {
+    const rx = randomIntFromInterval((bounds.xMin - 1) * 100, (bounds.xMax + 1) * 100);
+    const ry = randomIntFromInterval((bounds.yMin - 1) * 100, (bounds.yMax + 1) * 100);
+
+    partProgEmber(instance, {
+        x: rx / 100,
+        y: ry / 100,
+        maxChance: 5,
+        loopBack: true
+    });
+}
+
+/**
+ * Render a smoke effect for the given instance.
+ * @param {PixelEngineInstance} instance - The pixel engine instance.
+ * @param {Object} options - Options for the smoke effect.
+ * @param {string} options.color - Color of the smoke.
+ * @param {number} options.x - X coordinate of the smoke origin.
+ * @param {number} options.y - Y coordinate of the smoke origin.
+ * @param {number} options.z - Simulated elevation of the smoke origin.
+ * @param {number} options.zI - zIndex of the effect.
+ */
+function partProgSmoke(instance, options) {
+    const chance = randomIntFromInterval(0, 16);
+
+    if(chance < 13) {
+        return;
+    }
+
+    const color = options.color || "#666666";
+
+    const vx = (randomIntFromInterval(0, 100) / 10000) - 0.005;
+    const vy = (randomIntFromInterval(0, 100) / 10000) - 0.005;
+
+    const z = options.z || 0;
+    const zIndex = options.zI || 0;
+
+    instance.insertParticleInstruction({
+        x: options.x,
+        y: options.y,
+        z: z,
+        zI: zIndex,
+        color: color,
+        vx: vx,
+        vy: vy,
+        vz: -0.0002,
+        gz: -0.0002,
+        fadeSpeed: 0.01,
+        colorVariance: 32
+    });
+}
+
+function variateHexColor(hex, variance) {
+    const rgb = hexToRGB(hex);
+
+    const r = rgb.r + randomIntFromInterval(-variance, variance);
+    const g = rgb.g + randomIntFromInterval(-variance, variance);
+    const b = rgb.b + randomIntFromInterval(-variance, variance);
+
+    return rgbToHex(r, g, b);
+}
+
+/**
+ * Render an ember effect for the given instance.
+ * @param {PixelEngineInstance} instance - The pixel engine instance.
+ * @param {Object} options - Options for the ember effect.
+ * @param {string} options.color - Color of the ember.
+ * @param {number} options.maxChance - Maximum chance of ember generation.
+ * @param {number} options.x - X coordinate of the ember origin.
+ * @param {number} options.y - Y coordinate of the ember origin.
+ * @param {number} options.z - Simulated elevation of the ember origin.
+ * @param {number} options.zI - zIndex of the effect.
+ * @param {number} options.colorVariance - Variance in color for the ember.
+ * @param {boolean} options.loopBack - Whether the ember should loop back.
+ */
+function partProgEmber(instance, options) {
+
+    const maxChance = options.maxChance || 40;
+
+    const chance = randomIntFromInterval(0, maxChance);
+
+    if(chance > 0) {
+        return;
+    }
+
+    const z = options.z || 0;
+    const zIndex = options.zI || 0;
+    const color = options.color || "#EF6C00";
+    const colorVariance = options.colorVariance || 12;
+    const loopBack = options.loopBack || false;
+
+    const rv = randomIntFromInterval(1, 2) / 100;
+
+    instance.insertParticleInstruction({
+        x: options.x,
+        y: options.y,
+        z: z,
+        zI: zIndex,
+        vx: Math.sin(instance.rndAngle) * 2,
+        vy: rv,
+        vz: 0,
+        gz: -0.01,
+        tv: 0,
+        color: color,
+        size: 1,
+        opacity: 0.6,
+        composit: "screen",
+        ignoreLighting: false,
+        trails: false,
+        useRaw: false,
+        useGlobalAngle: true,
+        loopsBack: loopBack,
+        colorVariance: colorVariance
+    });
 }
 
 export default {
@@ -1674,7 +2550,9 @@ export default {
     isOdd,
     onResize,
     PixelEngineInstance,
-    Texture
+    Texture,
+    EFFECT_PROGRAMS,
+    ENVIRONMENTAL_EFFECTS
 };
 
 globalRender();
