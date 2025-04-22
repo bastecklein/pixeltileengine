@@ -1003,6 +1003,8 @@ function renderInstance(instance, elapsed, delta, fps) {
     while(completePrograms.length > 0) {
         const inst = completePrograms.pop();
 
+        removeFromArray(instance.programParticles, inst);
+
         if(particleInstructionRecycling.length < 1000) {
             particleInstructionRecycling.push(inst);
         }
