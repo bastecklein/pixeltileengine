@@ -1002,7 +1002,10 @@ function renderInstance(instance, elapsed, delta, fps) {
 
     while(completePrograms.length > 0) {
         const inst = completePrograms.pop();
-        particleInstructionRecycling.push(inst);
+
+        if(particleInstructionRecycling.length < 1000) {
+            particleInstructionRecycling.push(inst);
+        }
     }
 
     instance.canvas.width = instance.width;
@@ -1077,7 +1080,10 @@ function renderInstance(instance, elapsed, delta, fps) {
     while(instance.renderInstructions.length > 0) {
         const inst = instance.renderInstructions.pop();
         inst.texture = null;
-        instructionRecycling.push(inst);
+
+        if(instructionRecycling.length < 1000) {
+            instructionRecycling.push(inst);
+        }
     }
 
     if(instance.touchstickFunction) {
