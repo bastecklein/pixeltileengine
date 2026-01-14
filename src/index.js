@@ -158,8 +158,14 @@ export class PixelEngineInstance {
         this.context.imageSmoothingEnabled = false;
 
         this.width = options.width || 256;
-        this.height = 224;
-        this.tileSize = DEF_TILE_SIZE;
+        this.height = options.height || 224;
+
+        this.setupWidth = this.width;
+
+        this.renderScale = 1; // Internal resolution multiplier (1=default, 2=4x pixels, 3=9x pixels, etc.)
+
+        this.tileSize = options.tileSize || DEF_TILE_SIZE;
+        this.apparentTileSize = 0;
 
         this.rndAngle = 0;
 
@@ -186,13 +192,14 @@ export class PixelEngineInstance {
         this.touchstickRightMX = -1;
         this.touchstickRightMY = -1;
 
-        this.touchstickRadius = 40;
+        this.touchstickRadius = 40; // Will be scaled by renderScale
 
         this.renderInstructions = [];
         this.activeLights = [];
         this.programParticles = [];
 
         this.environmentalEffect = ENVIRONMENTAL_EFFECTS.none;
+        this.environmentalEffectZIndex = 1;
 
         this.roundingOp = Math.round;
 
@@ -210,6 +217,8 @@ export class PixelEngineInstance {
         };
 
         this.filters = [];
+
+        this.sunAngle = 0; // Sun direction in radians (0 = east/right, PI = west/left)
 
         handleInput({
             element: instanceRef.canvas,
@@ -295,11 +304,15 @@ export class PixelEngineInstance {
      * Sets the environmental effect for the instance.
      * @param {number} effect - The environmental effect to set (e.g., ENVIRONMENTAL_EFFECTS.rain).
      */
-    setEnvironmentalEffect(effect) {
+    setEnvironmentalEffect(effect, zIndex) {
         if(effect) {
             this.environmentalEffect = effect;
         } else {
             this.environmentalEffect = ENVIRONMENTAL_EFFECTS.none;
+        }
+
+        if(zIndex != undefined) {
+            this.environmentalEffectZIndex = zIndex;
         }
     }
 
@@ -333,6 +346,21 @@ export class PixelEngineInstance {
         } else {
             instance.filters = filters.split(",");
         }
+    }
+
+    setSunAngle(degrees) {
+        // Convert degrees to radians (0° = east/right, 180° = west/left)
+        this.sunAngle = degrees * PI_ONE_EIGHTY;
+    }
+
+    setRenderScale(scale) {
+        // Set internal resolution multiplier (1=default, 2=4x pixels, 3=9x pixels)
+        // Higher values improve rotation quality but increase pixel count
+        if(scale < 1) scale = 1;
+        if(scale > 8) scale = 8; // Cap at 8x for safety
+        
+        this.renderScale = Math.floor(scale);
+        resizeInstance(this);
     }
 
     setRenderFunction(func) {
@@ -395,6 +423,26 @@ export class PixelEngineInstance {
             drawOp.opacity = options.opacity;
         }
 
+        if(options.distortion != undefined) {
+            drawOp.distortion = options.distortion;
+        }
+
+        if(options.distortionSpeed != undefined) {
+            drawOp.distortionSpeed = options.distortionSpeed;
+        }
+
+        if(options.distortionScale != undefined) {
+            drawOp.distortionScale = options.distortionScale;
+        }
+
+        if(options.reflectivity != undefined) {
+            drawOp.reflectivity = options.reflectivity;
+        }
+
+        if(options.shimmer != undefined) {
+            drawOp.shimmer = options.shimmer;
+        }
+
         instance.renderInstructions.push(drawOp);
     }
 
@@ -407,6 +455,7 @@ export class PixelEngineInstance {
         const drawOp = getFreshDrawOperation();
 
         drawOp.type = "sprite";
+
         drawOp.x = options.x;
         drawOp.y = options.y;
 
@@ -595,6 +644,22 @@ export class PixelEngineInstance {
 
         delete engineInstances[instance.id];
     }
+
+    setWidth(width) {
+        this.width = width;
+        this.setupWidth = width;
+        resizeInstance(this);
+    }
+
+    setApparentTileSize(tileSize) {
+        this.apparentTileSize = tileSize;
+        resizeInstance(this);
+    }
+
+    setTileSize(tileSize) {
+        this.tileSize = tileSize;
+        resizeInstance(this);
+    }
 }
 
 export class Texture {
@@ -603,6 +668,7 @@ export class Texture {
 
         this.type = options.type || null;
         this.rawData = options.data || null;
+        this.src = options.src || null;
 
         this.image = [];
         this.imageData = [];
@@ -659,6 +725,11 @@ export class Texture {
  * @property {string} composit - The operation to use for compositing.
  * @property {boolean} ignoreLighting - Whether to ignore lighting effects.
  * @property {object} colorFilter - The color filter to apply to the sprite.
+ * @property {number} distortion - The amount of wave distortion to apply (0-1, for water refraction effects).
+ * @property {number} distortionSpeed - The speed multiplier for distortion animation.
+ * @property {number} distortionScale - The scale/size of the distortion wave pattern.
+ * @property {number} reflectivity - How much sun reflection/specular highlight to show (0-1).
+ * @property {number} shimmer - Animated sparkle intensity for reflections (0-1, 0=smooth reflection, 1=strong shimmer).
  */
 class DrawInstruction {
     constructor() {
@@ -678,6 +749,11 @@ class DrawInstruction {
         this.composit = null;
         this.ignoreLighting = false;
         this.colorFilter = null;
+        this.distortion = 0;
+        this.distortionSpeed = 1;
+        this.distortionScale = 1;
+        this.reflectivity = 0;
+        this.shimmer = 0;
     }
 }
 
@@ -770,13 +846,28 @@ function resizeInstance(instance) {
         const aWidth = holder.offsetWidth;
         const aHeight = holder.offsetHeight;
 
+        if(instance.apparentTileSize && instance.apparentTileSize > 0) {
+            const apparentTilesPerViewportX = aWidth / instance.apparentTileSize;
+            const neededWidth = instance.tileSize * apparentTilesPerViewportX;
+
+            instance.width = Math.floor(neededWidth);
+
+            const scale = instance.width / aWidth;
+            const useHeight = Math.floor(aHeight * scale);
+
+            instance.height = useHeight;
+        } else {
+            instance.width = instance.setupWidth;
+        }
+
         const scale = instance.width / aWidth;
         const useHeight = Math.floor(aHeight * scale);
 
         instance.height = useHeight;
 
-        instance.canvas.width = instance.width;
-        instance.canvas.height = instance.height;
+        // Apply render scale to actual canvas dimensions
+        instance.canvas.width = instance.width * instance.renderScale;
+        instance.canvas.height = instance.height * instance.renderScale;
     }
 
     if(isOdd(instance.height)) {
@@ -930,7 +1021,7 @@ function weighColors(c1, c2, w1, w2) {
 }
 
 function initTexture(texture) {
-    if(!texture || !texture.type || !texture.rawData) {
+    if(!texture || !texture.type || (!texture.rawData && !texture.src)) {
         return;
     }
 
@@ -964,6 +1055,11 @@ function getFreshDrawOperation() {
         op.composit = null;
         op.ignoreLighting = false;
         op.colorFilter = null;
+        op.distortion = 0;
+        op.distortionSpeed = 1;
+        op.distortionScale = 1;
+        op.reflectivity = 0;
+        op.shimmer = 0;
     } else {
         return new DrawInstruction();
     }
@@ -998,6 +1094,21 @@ function renderInstance(instance, elapsed, delta, fps) {
         }
 
         updateParticle(instance, inst, delta, currentBounds);
+        
+        // Convert particle to draw instruction so it actually renders
+        // zI is the base rendering layer, z is elevation offset for height simulation
+        const renderZIndex = inst.zI;// + Math.floor(inst.z);
+        instance.drawParticle({
+            color: inst.color,
+            x: inst.x,
+            y: inst.y,
+            z: renderZIndex,
+            scale: inst.size,
+            opacity: inst.opacity,
+            composit: inst.composit,
+            ignoreLighting: inst.ignoreLighting,
+            useRaw: inst.useRaw
+        });
     }
 
     while(completePrograms.length > 0) {
@@ -1010,8 +1121,8 @@ function renderInstance(instance, elapsed, delta, fps) {
         }
     }
 
-    instance.canvas.width = instance.width;
-    instance.canvas.height = instance.height;
+    instance.canvas.width = instance.width * instance.renderScale;
+    instance.canvas.height = instance.height * instance.renderScale;
 
     const context = instance.context;
 
@@ -1055,7 +1166,9 @@ function renderInstance(instance, elapsed, delta, fps) {
 
     instance.activeLights = [];
 
-    const outputData = context.getImageData(0, 0, instance.width, instance.height);
+    const scaledWidth = instance.width * instance.renderScale;
+    const scaledHeight = instance.height * instance.renderScale;
+    const outputData = context.getImageData(0, 0, scaledWidth, scaledHeight);
 
     for(let i = 0; i < instance.renderInstructions.length; i++) {
         const inst = instance.renderInstructions[i];
@@ -1153,8 +1266,8 @@ function getCanvasCoordinatePrecise(instance, x, y) {
     let hh = 0;
 
     if(instance.fixedCanvas) {
-        hw = instance.canvas.width;
-        hh = instance.canvas.height;
+        hw = instance.canvas.width / instance.renderScale;
+        hh = instance.canvas.height / instance.renderScale;
     } else {
         const holder = instance.holder;
         hw = holder.offsetWidth;
@@ -1261,7 +1374,7 @@ function pointerLocationToTile(instance, x, y) {
 
 function loadPPPTexture(texture) {
     // ppp object
-    if(texture.rawData.id && texture.rawData.frames) {
+    if(texture.rawData && texture.rawData.id && texture.rawData.frames) {
 
         texture.height = texture.rawData.height;
         texture.width = texture.rawData.width;
@@ -1341,6 +1454,15 @@ function loadPPPTexture(texture) {
                 }
             }
         });
+
+        return;
+    }
+
+    if(texture.src) {
+        fetch(texture.src).then(async function(response) {
+            texture.rawData = await response.json();
+            loadPPPTexture(texture);
+        });
     }
 }
 
@@ -1376,7 +1498,7 @@ function renderTile(instance, inst, outputData) {
 
     const inD = data.data;
 
-    drawImageData(instance, texture, inD, dx, dy, 1, null, 0, opacity, false, outputData, false, null);
+    drawImageData(instance, texture, inD, dx, dy, 1, null, 0, opacity, false, outputData, false, null, inst.distortion, inst.distortionSpeed, inst.distortionScale, inst.reflectivity, inst.shimmer);
 }
 
 function renderSprite(instance, inst, outputData) {
@@ -1415,65 +1537,80 @@ function renderSprite(instance, inst, outputData) {
 
     const inD = data.data;
 
-    drawImageData(instance, texture, inD, dx, dy, inst.scale, inst.composit, inst.rotation, inst.opacity, inst.mirror, outputData, inst.ignoreLighting, inst.colorFilter);
+    drawImageData(instance, texture, inD, dx, dy, inst.scale, inst.composit, inst.rotation, inst.opacity, inst.mirror, outputData, inst.ignoreLighting, inst.colorFilter, 0, 1, 1, 0, 0);
 
 }
 
 function renderTouchStick(instance, cx, cy, sx, sy) {
+    const scale = instance.renderScale;
+    
     instance.context.strokeStyle = "#ffffff";
     instance.context.fillStyle = "rgba(255, 255, 255, 0.4)";
 
     instance.context.beginPath();
-    instance.context.arc(cx, cy, instance.touchstickRadius, 0, Math.PI * 2);
+    instance.context.arc(cx * scale, cy * scale, instance.touchstickRadius * scale, 0, Math.PI * 2);
     instance.context.stroke();
 
     instance.context.beginPath();
-    instance.context.arc(sx, sy, Math.ceil(instance.touchstickRadius * 0.3), 0, Math.PI * 2);
+    instance.context.arc(sx * scale, sy * scale, Math.ceil(instance.touchstickRadius * 0.3 * scale), 0, Math.PI * 2);
     instance.context.fill();
 }
 
-function drawImageData(instance, texture, inputData, dx, dy, scale, composit, rotation, opacity, mirror, outputData, ignoreLighting, colorFilter) {
+function drawImageData(instance, texture, inputData, dx, dy, scale, composit, rotation, opacity, mirror, outputData, ignoreLighting, colorFilter, distortion, distortionSpeed, distortionScale, reflectivity, shimmer) {
 
-    const drawHeight = Math.round(texture.height * scale);
-    const drawWidth = Math.round(texture.width * scale);
+    const renderScale = instance.renderScale;
 
-    let minX = dx;
-    let maxX = dx + drawWidth;
+    // Scale all dimensions and positions by renderScale
+    const drawHeight = Math.round(texture.height * scale * renderScale);
+    const drawWidth = Math.round(texture.width * scale * renderScale);
 
-    let minY = dy;
-    let maxY = dy + drawHeight;
+    // Original sprite position and center (before rotation expansion)
+    const spriteMinX = Math.round(dx * renderScale);
+    const spriteMinY = Math.round(dy * renderScale);
+    const spriteCenterX = spriteMinX + drawWidth / 2;
+    const spriteCenterY = spriteMinY + drawHeight / 2;
+
+    // Rendering bounds (may be expanded for rotation)
+    let minX = spriteMinX;
+    let maxX = spriteMinX + drawWidth;
+    let minY = spriteMinY;
+    let maxY = spriteMinY + drawHeight;
 
     if(rotation != 0) {
-        const quarterHeight = Math.ceil(drawHeight / 4);
-
-        minX -= quarterHeight;
-        minY -= quarterHeight;
-
-        maxX += quarterHeight;
-        maxY += quarterHeight;
+        // For rotation, expand bounds to fit the diagonal (worst case: 45° rotation)
+        const diagonal = Math.ceil(Math.sqrt(drawWidth * drawWidth + drawHeight * drawHeight));
+        
+        // Center the square on the sprite's original center
+        minX = Math.floor(spriteCenterX - diagonal / 2);
+        maxX = Math.ceil(spriteCenterX + diagonal / 2);
+        minY = Math.floor(spriteCenterY - diagonal / 2);
+        maxY = Math.ceil(spriteCenterY + diagonal / 2);
     }
+
+    const scaledWidth = instance.width * renderScale;
+    const scaledHeight = instance.height * renderScale;
 
     if(maxX < 0 || maxY < 0) {
         return;
     }
 
-    if(minX > instance.width || minY > instance.height) {
+    if(minX > scaledWidth || minY > scaledHeight) {
         return;
     }
 
-    const cx = Math.round((minX + maxX) / 2);
-    const cy = Math.round((minY + maxY) / 2);
+    const cx = Math.round(spriteCenterX);
+    const cy = Math.round(spriteCenterY);
 
     for(let x = minX; x < maxX; x++) {
 
-        if(x < 0 || x >= instance.width) {
+        if(x < 0 || x >= scaledWidth) {
             continue;
         }
 
         const ncx = x - cx;
 
         for(let y = minY; y < maxY; y++) {
-            if(y < 0 || y >= instance.height) {
+            if(y < 0 || y >= scaledHeight) {
                 continue;
             }
 
@@ -1483,30 +1620,86 @@ function drawImageData(instance, texture, inputData, dx, dy, scale, composit, ro
             let ucy = y;
 
             if(rotation != 0) {
-                const rotCos = Math.cos(rotation);
-                const rotSin = Math.sin(rotation);
+                // Check if rotation is a 90° increment (much faster than general rotation)
+                const rotDeg = Math.round(rotation / PI_ONE_EIGHTY);
+                const is90Increment = Math.abs(rotDeg % 90) < 0.1;
 
-                ucx = Math.round((rotCos * (ncx)) - (rotSin * (ncy)) + cx);
-                ucy = Math.round((rotCos * (ncy)) + (rotSin * (ncx)) + cy);
+                if(is90Increment) {
+                    // Fast path for 90°/180°/270° rotations - no trig needed
+                    const quadrant = ((rotDeg % 360) + 360) % 360;
+                    
+                    if(quadrant === 0) {
+                        // 0° - no rotation
+                        ucx = x;
+                        ucy = y;
+                    } else if(Math.abs(quadrant - 90) < 1) {
+                        // 90° clockwise: rotate coordinates
+                        ucx = cy + ncy;
+                        ucy = cx - ncx;
+                    } else if(Math.abs(quadrant - 180) < 1) {
+                        // 180°: flip both
+                        ucx = cx - ncx;
+                        ucy = cy - ncy;
+                    } else if(Math.abs(quadrant - 270) < 1) {
+                        // 270° clockwise (-90°)
+                        ucx = cy - ncy;
+                        ucy = cx + ncx;
+                    }
+                } else {
+                    // General rotation with trig (slower)
+                    const rotCos = Math.cos(rotation);
+                    const rotSin = Math.sin(rotation);
+
+                    ucx = Math.round((rotCos * (ncx)) - (rotSin * (ncy)) + cx);
+                    ucy = Math.round((rotCos * (ncy)) + (rotSin * (ncx)) + cy);
+                }
             }
 
-            const xPer = (ucx - dx) / drawWidth;
+            // Calculate texture coordinates relative to the ORIGINAL sprite bounds, not expanded bounds
+            let xPer = (ucx - spriteMinX) / drawWidth;
+            let yPer = (ucy - spriteMinY) / drawHeight;
+
+            // Early rejection: skip pixels that are clearly outside the sprite bounds (optimization for rotation)
+            if(rotation != 0 && (xPer < -0.01 || xPer > 1.01 || yPer < -0.01 || yPer > 1.01)) {
+                continue;
+            }
+
+            // Apply distortion effect (water refraction)
+            if(distortion > 0) {
+                const time = instance.rndAngle * distortionSpeed;
+                const distortAmount = distortion * 0.05; // Scale distortion to reasonable amount
+                
+                // Create wave patterns using different frequencies
+                const xOffset = Math.sin((time + yPer * 10) * distortionScale) * distortAmount;
+                const yOffset = Math.cos((time + xPer * 10) * distortionScale) * distortAmount;
+                
+                xPer += xOffset;
+                yPer += yOffset;
+                
+                // Wrap coordinates to prevent gaps (seamless tiling)
+                xPer = xPer - Math.floor(xPer);
+                yPer = yPer - Math.floor(yPer);
+            }
+
             let srcX = Math.round(texture.width * xPer);
 
             if(mirror) {
                 srcX = texture.width - srcX;
             }
 
-            if(srcX < 0 || srcX >= texture.width) {
-                continue;
-            }
-
-            const yPer = (ucy - dy) / drawHeight;
             let srcY = Math.round(texture.height * yPer);
 
-            if(srcY < 0 || srcY >= texture.height) {
+            // Skip pixels outside texture bounds (for rotation) instead of clamping
+            // This prevents edge pixels from being stretched at rotated corners
+            if(rotation != 0 && (srcX < 0 || srcX >= texture.width || srcY < 0 || srcY >= texture.height)) {
                 continue;
             }
+
+            // Clamp to texture bounds for non-rotated sprites
+            if(srcX < 0) srcX = 0;
+            if(srcX >= texture.width) srcX = texture.width - 1;
+            if(srcY < 0) srcY = 0;
+            if(srcY >= texture.height) srcY = texture.height - 1;
 
             const inputIndex = ((srcY * texture.width) + srcX) * 4;
 
@@ -1535,6 +1728,44 @@ function drawImageData(instance, texture, inputData, dx, dy, scale, composit, ro
 
                 if(incomingB > 255) {
                     incomingB = 255;
+                }
+            }
+
+            // Apply sun reflection/specular highlights
+            if(reflectivity > 0) {
+                // Calculate sun reflection based on screen position and sun angle
+                const sunDirX = Math.cos(instance.sunAngle);
+                const sunDirY = Math.sin(instance.sunAngle);
+                
+                // Normalize screen position (0-1)
+                const screenX = x / scaledWidth;
+                const screenY = y / scaledHeight;
+                
+                // Calculate how aligned this pixel is with sun direction
+                // Using dot product concept: pixels facing the sun get more reflection
+                const alignment = (screenX * sunDirX + screenY * sunDirY) * 0.5 + 0.5;
+                
+                // Create highlight falloff from optimal reflection point
+                let highlight = Math.pow(alignment, 8) * reflectivity;
+                
+                // Add shimmer effect if enabled
+                if(shimmer > 0) {
+                    const time = instance.rndAngle;
+                    // Create animated noise pattern for sparkles
+                    const sparkle1 = Math.sin(time * 3 + x * 0.5 + y * 0.3);
+                    const sparkle2 = Math.cos(time * 2 + x * 0.3 + y * 0.5);
+                    const sparkleNoise = (sparkle1 * sparkle2 + 1) * 0.5; // 0-1 range
+                    
+                    // Shimmer modulates the highlight with noise
+                    highlight *= (1 - shimmer) + (sparkleNoise * shimmer);
+                }
+                
+                // Apply highlight as additive brightness (screen blend)
+                if(highlight > 0) {
+                    const brightBoost = Math.round(highlight * 255);
+                    incomingR = Math.min(255, incomingR + brightBoost);
+                    incomingG = Math.min(255, incomingG + brightBoost);
+                    incomingB = Math.min(255, incomingB + brightBoost);
                 }
             }
 
@@ -1570,7 +1801,7 @@ function setColorAtPoint(instance, outputData, x, y, r, g, b, a, composit, ignor
 
     if(!ignoreLighting) {
 
-        const lighting = instance.getLightingAtPosition(x, y);
+        const lighting = instance.getLightingAtPosition(x / instance.renderScale, y / instance.renderScale);
 
         r = multiplyColors(r, lighting.r, false);
         g = multiplyColors(g, lighting.g, false);
@@ -1578,7 +1809,8 @@ function setColorAtPoint(instance, outputData, x, y, r, g, b, a, composit, ignor
     }
     
     const d = outputData.data;
-    const imJ = y * instance.width;
+    const scaledWidth = instance.width * instance.renderScale;
+    const imJ = y * scaledWidth;
     const idx = (imJ + x) * 4;
     const dl = d.length;
 
@@ -1594,14 +1826,6 @@ function setColorAtPoint(instance, outputData, x, y, r, g, b, a, composit, ignor
     const exR = d[idx];
     const exG = d[idx + 1];
     const exB = d[idx + 2];
-
-    if(a && a < 255) {
-        const alPer = a / 255;
-
-        r = weighColors(exR, r , 1, alPer);
-        g = weighColors(exG, g , 1, alPer);
-        b = weighColors(exB, b , 1, alPer);
-    }
 
     if(composit) {
         if(composit == "hard-light") {
@@ -1636,8 +1860,8 @@ function setColorAtPoint(instance, outputData, x, y, r, g, b, a, composit, ignor
 
         if(composit == "overlay") {
             r = screenColors(r, multiplyColors(r, exR));
-            g = screenColors(r, multiplyColors(g, exG));
-            b = screenColors(r, multiplyColors(b, exB));
+            g = screenColors(g, multiplyColors(g, exG));
+            b = screenColors(b, multiplyColors(b, exB));
         }
 
         if(composit == "darken") {
@@ -1651,6 +1875,20 @@ function setColorAtPoint(instance, outputData, x, y, r, g, b, a, composit, ignor
             g = darkerColors(g, exG);
             b = darkerColors(b, exB);
         }
+    } else if(a && a < 255) {
+        // Apply alpha blending for non-composited pixels
+        const alPer = a / 255;
+        r = weighColors(exR, r, 1, alPer);
+        g = weighColors(exG, g, 1, alPer);
+        b = weighColors(exB, b, 1, alPer);
+    }
+
+    // Apply alpha to composited result if needed
+    if(composit && a && a < 255) {
+        const alPer = a / 255;
+        r = weighColors(exR, r, 1, alPer);
+        g = weighColors(exG, g, 1, alPer);
+        b = weighColors(exB, b, 1, alPer);
     }
 
     if(instance.filters && instance.filters.length > 0) {
@@ -2123,8 +2361,11 @@ function updateParticle(instance, inst, delta, bounds) {
     const oy = inst.y;
     const oz = inst.z;
 
+    // Apply horizontal velocity
     if(inst.useGlobalAngle) {
-        inst.x += (Math.sin(instance.rndAngle) * 2) * delta;
+        // Global wind effect: subtle unified drift for all particles (pixel-art scale)
+        const globalDrift = Math.sin(instance.rndAngle * PI_ONE_EIGHTY) * 0.01; // ±0.01 tiles/frame
+        inst.x += (inst.vx + globalDrift) * delta;
     } else {
         inst.x += inst.vx * delta;
     }
@@ -2234,20 +2475,6 @@ function updateParticle(instance, inst, delta, bounds) {
             radius: inst.glowRadius
         });
     }
-
-    const renderZIndex = inst.zI + Math.floor(inst.z);
-
-    instance.drawParticle({
-        x: inst.x,
-        y: inst.y,
-        z: renderZIndex,
-        color: inst.color,
-        scale: inst.size,
-        opacity: inst.opacity,
-        composit: inst.composit,
-        ignoreLighting: inst.ignoreLighting,
-        useRaw: inst.useRaw,
-    });
 }
 
 /**
@@ -2271,14 +2498,16 @@ function renderParticle(instance, inst, outputData) {
 
     const elevationOffset = Math.round(inst.z * instance.tileSize);
 
-    const dx = Math.round((inst.x * instance.tileSize) - uvx);
-    const dy = (instance.roundingOp((inst.y * instance.tileSize) - instance.viewY) - (inst.scale - instance.tileSize)) - elevationOffset;
+    const dx = Math.round(((inst.x * instance.tileSize) - uvx) * instance.renderScale);
+    const dy = (instance.roundingOp((inst.y * instance.tileSize) - instance.viewY) - (inst.scale - instance.tileSize)) * instance.renderScale - elevationOffset;
+
+    const scaledSize = inst.scale * instance.renderScale;
 
     let minX = dx;
-    let maxX = dx + inst.scale;
+    let maxX = dx + scaledSize;
 
     let minY = dy;
-    let maxY = dy + inst.scale;
+    let maxY = dy + scaledSize;
 
     const rgb = hexToRGB(color);
 
@@ -2318,13 +2547,16 @@ function renderParticle(instance, inst, outputData) {
         }
     }
 
+    const scaledWidth = instance.width * instance.renderScale;
+    const scaledHeight = instance.height * instance.renderScale;
+
     for(let x = minX; x < maxX; x++) {
-        if(x < 0 || x >= instance.width) {
+        if(x < 0 || x >= scaledWidth) {
             continue;
         }
 
         for(let y = minY; y < maxY; y++) {
-            if(y < 0 || y >= instance.height) {
+            if(y < 0 || y >= scaledHeight) {
                 continue;
             }
 
@@ -2387,7 +2619,8 @@ function handleInstanceRain(instance, bounds) {
             composit: null,
             ignoreLighting: false,
             trails: true,
-            useRaw: false
+            useRaw: false,
+            zI: instance.environmentalEffectZIndex || 0
         });
     }
 }
@@ -2398,26 +2631,28 @@ function handleInstanceRain(instance, bounds) {
  * @param {Object} bounds - The current view bounds.
  */
 function handleInstanceSnow(instance, bounds) {
-    const snowChance = randomIntFromInterval(0, 5);
+    const snowChance = randomIntFromInterval(0, 4);
 
     if(snowChance == 2) {
         const rx = randomIntFromInterval((bounds.xMin - 1) * 100, (bounds.xMax + 1) * 100);
         const ry = randomIntFromInterval((bounds.yMin - 1) * 100, (bounds.yMax + 1) * 100);
 
-        const rv = randomIntFromInterval(1, 6) / 100;
+        // Pixel-art scale: fall 0.01-0.03 pixels/frame, drift barely at all
+        const fallSpeed = randomIntFromInterval(1, 3) / 100; // 0.01-0.03 pixels/frame downward
+        const drift = (randomIntFromInterval(-1, 1) / 10000); // ±0.0001 pixels/frame drift
 
         instance.insertParticleInstruction({
             x: rx / 100,
             y: ry / 100,
             z: instance.height / instance.tileSize,
-            vx: Math.sin(instance.rndAngle) * 2,
-            vy: rv,
+            vx: drift,
+            vy: fallSpeed,
             vz: 0,
             gz: 0,
             tv: 0,
             color: "#ffffff",
-            size: 1,
-            opacity: 0.8,
+            size: 2,
+            opacity: 0.9,
             composit: null,
             ignoreLighting: false,
             trails: false,
@@ -2425,7 +2660,8 @@ function handleInstanceSnow(instance, bounds) {
             useGlobalAngle: true,
             loopsBack: true,
             stayOnGround: true,
-            lifeOnGround: 300
+            lifeOnGround: 300,
+            zI: instance.environmentalEffectZIndex || 0
         });
     }
 }
@@ -2436,15 +2672,22 @@ function handleInstanceSnow(instance, bounds) {
  * @param {Object} bounds - The current view bounds.
  */
 function handleInstanceEmbers(instance, bounds) {
-    const rx = randomIntFromInterval((bounds.xMin - 1) * 100, (bounds.xMax + 1) * 100);
-    const ry = randomIntFromInterval((bounds.yMin - 1) * 100, (bounds.yMax + 1) * 100);
+    // Spawn multiple embers per frame from near the bottom of the screen
+    const emberCount = randomIntFromInterval(1, 3); // 1-3 embers per frame
+    
+    for(let i = 0; i < emberCount; i++) {
+        const rx = randomIntFromInterval((bounds.xMin + 1) * 100, (bounds.xMax - 1) * 100);
+        const ryOffset = randomIntFromInterval(0, 20) / 10; // 0 to 2 tiles variance
 
-    partProgEmber(instance, {
-        x: rx / 100,
-        y: ry / 100,
-        maxChance: 5,
-        loopBack: true
-    });
+        partProgEmber(instance, {
+            x: rx / 100,
+            y: bounds.yMax - ryOffset, // Vary Y position to prevent stacking
+            z: 0.1, // Small elevation so they don't get culled immediately
+            maxChance: 0, // Always spawn (bypass chance for debugging)
+            loopBack: false, // Don't loop, let them disappear at top
+            zI: instance.environmentalEffectZIndex || 0
+        });
+    }
 }
 
 /**
@@ -2490,9 +2733,17 @@ function partProgSmoke(instance, options) {
 function variateHexColor(hex, variance) {
     const rgb = hexToRGB(hex);
 
-    const r = rgb.r + randomIntFromInterval(-variance, variance);
-    const g = rgb.g + randomIntFromInterval(-variance, variance);
-    const b = rgb.b + randomIntFromInterval(-variance, variance);
+    let r = rgb.r + randomIntFromInterval(-variance, variance);
+    let g = rgb.g + randomIntFromInterval(-variance, variance);
+    let b = rgb.b + randomIntFromInterval(-variance, variance);
+
+    // Clamp values to 0-255 range
+    if(r < 0) r = 0;
+    if(r > 255) r = 255;
+    if(g < 0) g = 0;
+    if(g > 255) g = 255;
+    if(b < 0) b = 0;
+    if(b > 255) b = 255;
 
     return rgbToHex(r, g, b);
 }
@@ -2522,32 +2773,40 @@ function partProgEmber(instance, options) {
 
     const z = options.z || 0;
     const zIndex = options.zI || 0;
-    const color = options.color || "#EF6C00";
-    const colorVariance = options.colorVariance || 12;
+    
+    // Ember colors: orange-yellow spectrum
+    const emberColors = ["#FF6600", "#FF7700", "#FF8800", "#FF9900", "#FFAA00"];
+    const color = emberColors[randomIntFromInterval(0, emberColors.length - 1)];
+    const colorVariance = 30; // Color variation for natural look
     const loopBack = options.loopBack || false;
 
-    const rv = randomIntFromInterval(1, 2) / 100;
+    // Much slower rise - particles move in TILE coordinates
+    const riseSpeed = -randomIntFromInterval(2, 7) / 500; // -0.004 to -0.012 tiles/frame
+    const drift = (randomIntFromInterval(-2, 2) / 1000); // ±0.001 tiles/frame individual drift
 
     instance.insertParticleInstruction({
         x: options.x,
         y: options.y,
         z: z,
         zI: zIndex,
-        vx: Math.sin(instance.rndAngle) * 2,
-        vy: rv,
+        vx: drift,
+        vy: riseSpeed,
         vz: 0,
-        gz: -0.01,
-        tv: 0,
+        gz: -0.00001, // Very slight upward force to keep them airborne
+        tv: 0.04,
         color: color,
-        size: 1,
-        opacity: 0.6,
-        composit: "screen",
-        ignoreLighting: false,
+        size: 2,
+        opacity: 0.9, // Slightly transparent for glow effect
+        composit: "lighter", // Additive blending for fire-like glow
+        ignoreLighting: true, // Embers emit their own light
         trails: false,
         useRaw: false,
         useGlobalAngle: true,
         loopsBack: loopBack,
-        colorVariance: colorVariance
+        colorVariance: colorVariance,
+        glowRadius: 0.45,
+        glowBrightness: 0.35,
+        life: 1800 // 30 seconds at 60fps - enough time to cross the viewport
     });
 }
 

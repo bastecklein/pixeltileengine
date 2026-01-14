@@ -1,6 +1,6 @@
 {
     "name": "pixeltileengine",
-    "version": "1.1.0",
+    "version": "1.2.0",
     "description": "A javascript software game rendering engine for creating tile map based games using Pixel Paint .ppp graphics.",
     "scripts": {
         "build": "webpack --config webpack.common.cjs"
