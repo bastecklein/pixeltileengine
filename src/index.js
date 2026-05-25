@@ -1523,8 +1523,16 @@ function renderSprite(instance, inst, outputData) {
         useFrame = inst.frame;
     }
 
-    const data = frames[useFrame];
+    let data = frames[useFrame];
 
+    if(!data) {
+        useFrame = 0;
+        data = frames[useFrame];
+    }
+
+    if(!data) {
+        return;
+    }
 
     let uvx = instance.viewX;
 
