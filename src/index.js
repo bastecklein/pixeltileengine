@@ -1,6 +1,6 @@
 import { renderPPP } from "ppp-tools";
 import { handleInput } from "input-helper";
-import { guid, removeFromArray, distBetweenPoints, hexToRGB, randomIntFromInterval, rgbToHex } from "common-helpers";
+import { guid, removeFromArray, hexToRGB, randomIntFromInterval, rgbToHex } from "common-helpers";
 
 window.addEventListener("resize", onResize);
 
@@ -271,11 +271,16 @@ export class PixelEngineInstance {
 
         for(let i = 0; i < instance.activeLights.length; i++) {
             const light = instance.activeLights[i];
-            const dist = distBetweenPoints(x, y, light.x, light.y);
+            const dx = x - light.x;
+            const dy = y - light.y;
+            const distSq = (dx * dx) + (dy * dy);
+            const scaleSq = light.lightScaleSq || (light.scale * light.scale);
 
-            if(dist > light.scale) {
+            if(distSq > scaleSq) {
                 continue;
             }
+
+            const dist = Math.sqrt(distSq);
 
             const bPer = 1 - (dist / light.scale);
             const brightness = light.frame * bPer;
@@ -465,11 +470,11 @@ export class PixelEngineInstance {
 
         drawOp.texture = options.texture;
 
-        if(options.scale) {
+        if(options.scale != undefined) {
             drawOp.scale = options.scale;
         }
 
-        if(options.opacity) {
+        if(options.opacity != undefined) {
             drawOp.opacity = options.opacity;
         }
 
@@ -505,8 +510,12 @@ export class PixelEngineInstance {
             drawOp.ignoreLighting = options.ignoreLighting;
         }
 
-        if(options.colorFilter != undefined && options.colorFilter.trim().length == 7) {
-            drawOp.colorFilter = hexToRGB(options.colorFilter);
+        if(typeof options.colorFilter == "string") {
+            const filter = options.colorFilter.trim();
+
+            if(filter.length == 7) {
+                drawOp.colorFilter = hexToRGB(filter);
+            }
         }
 
         instance.renderInstructions.push(drawOp);
@@ -534,6 +543,7 @@ export class PixelEngineInstance {
 
         drawOp.frame = options.intensity;
         drawOp.scale = options.radius * instance.tileSize;
+        drawOp.lightScaleSq = drawOp.scale * drawOp.scale;
 
         instance.renderInstructions.push(drawOp);
     }
@@ -754,6 +764,7 @@ class DrawInstruction {
         this.distortionScale = 1;
         this.reflectivity = 0;
         this.shimmer = 0;
+        this.lightScaleSq = 0;
     }
 }
 
@@ -1060,6 +1071,7 @@ function getFreshDrawOperation() {
         op.distortionScale = 1;
         op.reflectivity = 0;
         op.shimmer = 0;
+        op.lightScaleSq = 0;
     } else {
         return new DrawInstruction();
     }
@@ -1121,10 +1133,18 @@ function renderInstance(instance, elapsed, delta, fps) {
         }
     }
 
-    instance.canvas.width = instance.width * instance.renderScale;
-    instance.canvas.height = instance.height * instance.renderScale;
+    const scaledWidth = instance.width * instance.renderScale;
+    const scaledHeight = instance.height * instance.renderScale;
+
+    // Only resize the backing canvas when dimensions actually change.
+    if(instance.canvas.width != scaledWidth || instance.canvas.height != scaledHeight) {
+        instance.canvas.width = scaledWidth;
+        instance.canvas.height = scaledHeight;
+    }
 
     const context = instance.context;
+
+    instance.hasWeightedLighting = instance.weightedLighting.r != 255 || instance.weightedLighting.g != 255 || instance.weightedLighting.b != 255;
 
     // sort render instructions here
     instance.renderInstructions.sort(function(a, b) {
@@ -1166,8 +1186,6 @@ function renderInstance(instance, elapsed, delta, fps) {
 
     instance.activeLights = [];
 
-    const scaledWidth = instance.width * instance.renderScale;
-    const scaledHeight = instance.height * instance.renderScale;
     const outputData = context.getImageData(0, 0, scaledWidth, scaledHeight);
 
     for(let i = 0; i < instance.renderInstructions.length; i++) {
@@ -1262,8 +1280,8 @@ function cycleTexture(texture) {
 }
 
 function getCanvasCoordinatePrecise(instance, x, y) {
-    let hw = 0;
-    let hh = 0;
+    let hw;
+    let hh;
 
     if(instance.fixedCanvas) {
         hw = instance.canvas.width / instance.renderScale;
@@ -1609,6 +1627,40 @@ function drawImageData(instance, texture, inputData, dx, dy, scale, composit, ro
     const cx = Math.round(spriteCenterX);
     const cy = Math.round(spriteCenterY);
 
+    let rotationMode = 0;
+    let rotCos = 0;
+    let rotSin = 0;
+
+    if(rotation != 0) {
+        const rotDegRaw = rotation / PI_ONE_EIGHTY;
+        const rotDeg = Math.round(rotDegRaw);
+        const is90Increment = Math.abs(rotDegRaw - rotDeg) < 0.001 && rotDeg % 90 == 0;
+
+        if(is90Increment) {
+            const quadrant = ((rotDeg % 360) + 360) % 360;
+
+            if(quadrant == 90) {
+                rotationMode = 1;
+            } else if(quadrant == 180) {
+                rotationMode = 2;
+            } else if(quadrant == 270) {
+                rotationMode = 3;
+            }
+        } else {
+            rotationMode = 4;
+            rotCos = Math.cos(rotation);
+            rotSin = Math.sin(rotation);
+        }
+    }
+
+    let sunDirX = 0;
+    let sunDirY = 0;
+
+    if(reflectivity > 0) {
+        sunDirX = Math.cos(instance.sunAngle);
+        sunDirY = Math.sin(instance.sunAngle);
+    }
+
     for(let x = minX; x < maxX; x++) {
 
         if(x < 0 || x >= scaledWidth) {
@@ -1627,40 +1679,22 @@ function drawImageData(instance, texture, inputData, dx, dy, scale, composit, ro
             let ucx = x;
             let ucy = y;
 
-            if(rotation != 0) {
-                // Check if rotation is a 90° increment (much faster than general rotation)
-                const rotDeg = Math.round(rotation / PI_ONE_EIGHTY);
-                const is90Increment = Math.abs(rotDeg % 90) < 0.1;
-
-                if(is90Increment) {
-                    // Fast path for 90°/180°/270° rotations - no trig needed
-                    const quadrant = ((rotDeg % 360) + 360) % 360;
-                    
-                    if(quadrant === 0) {
-                        // 0° - no rotation
-                        ucx = x;
-                        ucy = y;
-                    } else if(Math.abs(quadrant - 90) < 1) {
-                        // 90° clockwise: rotate coordinates
-                        ucx = cy + ncy;
-                        ucy = cx - ncx;
-                    } else if(Math.abs(quadrant - 180) < 1) {
-                        // 180°: flip both
-                        ucx = cx - ncx;
-                        ucy = cy - ncy;
-                    } else if(Math.abs(quadrant - 270) < 1) {
-                        // 270° clockwise (-90°)
-                        ucx = cy - ncy;
-                        ucy = cx + ncx;
-                    }
-                } else {
-                    // General rotation with trig (slower)
-                    const rotCos = Math.cos(rotation);
-                    const rotSin = Math.sin(rotation);
-
-                    ucx = Math.round((rotCos * (ncx)) - (rotSin * (ncy)) + cx);
-                    ucy = Math.round((rotCos * (ncy)) + (rotSin * (ncx)) + cy);
-                }
+            if(rotationMode == 1) {
+                // 90° clockwise
+                ucx = cy + ncy;
+                ucy = cx - ncx;
+            } else if(rotationMode == 2) {
+                // 180°
+                ucx = cx - ncx;
+                ucy = cy - ncy;
+            } else if(rotationMode == 3) {
+                // 270° clockwise (-90°)
+                ucx = cy - ncy;
+                ucy = cx + ncx;
+            } else if(rotationMode == 4) {
+                // General rotation with cached trig values
+                ucx = Math.round((rotCos * (ncx)) - (rotSin * (ncy)) + cx);
+                ucy = Math.round((rotCos * (ncy)) + (rotSin * (ncx)) + cy);
             }
 
             // Calculate texture coordinates relative to the ORIGINAL sprite bounds, not expanded bounds
@@ -1692,7 +1726,7 @@ function drawImageData(instance, texture, inputData, dx, dy, scale, composit, ro
             let srcX = Math.round(texture.width * xPer);
 
             if(mirror) {
-                srcX = texture.width - srcX;
+                srcX = (texture.width - 1) - srcX;
             }
 
             let srcY = Math.round(texture.height * yPer);
@@ -1741,10 +1775,6 @@ function drawImageData(instance, texture, inputData, dx, dy, scale, composit, ro
 
             // Apply sun reflection/specular highlights
             if(reflectivity > 0) {
-                // Calculate sun reflection based on screen position and sun angle
-                const sunDirX = Math.cos(instance.sunAngle);
-                const sunDirY = Math.sin(instance.sunAngle);
-                
                 // Normalize screen position (0-1)
                 const screenX = x / scaledWidth;
                 const screenY = y / scaledHeight;
@@ -1808,12 +1838,17 @@ function getOverridePPPFrame(state, facing) {
 function setColorAtPoint(instance, outputData, x, y, r, g, b, a, composit, ignoreLighting) {
 
     if(!ignoreLighting) {
+        if(instance.activeLights.length > 0) {
+            const lighting = instance.getLightingAtPosition(x / instance.renderScale, y / instance.renderScale);
 
-        const lighting = instance.getLightingAtPosition(x / instance.renderScale, y / instance.renderScale);
-
-        r = multiplyColors(r, lighting.r, false);
-        g = multiplyColors(g, lighting.g, false);
-        b = multiplyColors(b, lighting.b, false);
+            r = multiplyColors(r, lighting.r, false);
+            g = multiplyColors(g, lighting.g, false);
+            b = multiplyColors(b, lighting.b, false);
+        } else if(instance.hasWeightedLighting) {
+            r = multiplyColors(r, instance.weightedLighting.r, false);
+            g = multiplyColors(g, instance.weightedLighting.g, false);
+            b = multiplyColors(b, instance.weightedLighting.b, false);
+        }
     }
     
     const d = outputData.data;
@@ -2095,9 +2130,13 @@ function setColorAtPoint(instance, outputData, x, y, r, g, b, a, composit, ignor
             }
 
             if(filter == "sepia") {
-                r = Math.round((r * 0.393) + (g * 0.769) + (b * 0.189));
-                g = Math.round((r * 0.349) + (g * 0.686) + (b * 0.168));
-                b = Math.round((r * 0.272) + (g * 0.534) + (b * 0.131));
+                const baseR = r;
+                const baseG = g;
+                const baseB = b;
+
+                r = Math.round((baseR * 0.393) + (baseG * 0.769) + (baseB * 0.189));
+                g = Math.round((baseR * 0.349) + (baseG * 0.686) + (baseB * 0.168));
+                b = Math.round((baseR * 0.272) + (baseG * 0.534) + (baseB * 0.131));
 
                 if(r > 255) {
                     r = 255;
@@ -2330,7 +2369,7 @@ function partProgSplat(instance, options) {
             vy: vy,
             vz: vz,
             size: size,
-            stayOnGround: options.stayOnGround || true,
+            stayOnGround: options.stayOnGround ?? true,
             lifeOnGround: 800,
             useRaw: useRaw,
         });
@@ -2771,7 +2810,7 @@ function variateHexColor(hex, variance) {
  */
 function partProgEmber(instance, options) {
 
-    const maxChance = options.maxChance || 40;
+    const maxChance = options.maxChance ?? 40;
 
     const chance = randomIntFromInterval(0, maxChance);
 
